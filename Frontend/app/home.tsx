@@ -1,10 +1,13 @@
 // app/home.tsx
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { HomeScreen } from '../src/features/home';
 
 export default function HomeRoute() {
-  // TODO: להחליף בשם משתמש אמיתי כשיהיה state של התחברות
-  const username = 'דנה';
+  const params = useLocalSearchParams<{ username?: string }>();
+  const username =
+    typeof params.username === 'string' && params.username.length > 0
+      ? params.username
+      : 'אורח';
 
   return (
     <HomeScreen
