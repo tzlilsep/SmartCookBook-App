@@ -1,3 +1,4 @@
+// Frontend\src\features\shoppingList\model\selectors.ts
 import { ShoppingListData } from './shopping.types';
 
 export const doneCount = (list: ShoppingListData) =>

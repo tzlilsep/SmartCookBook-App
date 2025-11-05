@@ -1,3 +1,4 @@
+// Backend\TS.Api\Features\ShoppingList\ShoppingListController.cs
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
@@ -39,9 +40,13 @@ namespace TS.Api.Features.ShoppingList
             ListId = l.ListId,
             Name   = l.Name,
             Items  = l.Items.Select(Map).ToArray(),
-            Order  = l.Order,   // <<< חדש
-            IsShared   = l.IsShared,
-            SharedWith = l.SharedWith
+            Order  = l.Order,   // נשמר ומוחזר מהשרת
+
+            // --- שיתוף ---
+            IsShared    = l.IsShared,
+            SharedWith  = l.SharedWith,
+            ShareStatus = l.ShareStatus,   // <<< חדש
+            IsOwner     = l.IsOwner        // <<< חדש
         };
 
         // API -> Engine
@@ -58,9 +63,13 @@ namespace TS.Api.Features.ShoppingList
             ListId = l.ListId,
             Name   = l.Name,
             Items  = l.Items.Select(Map).ToArray(),
-            Order  = l.Order,    // <<< חדש
-            IsShared   = l.IsShared,
-            SharedWith = l.SharedWith
+            Order  = l.Order,    // נשמר
+
+            // --- שיתוף ---
+            IsShared    = l.IsShared,
+            SharedWith  = l.SharedWith,
+            ShareStatus = l.ShareStatus,   // <<< חדש (אופציונלי)
+            IsOwner     = l.IsOwner        // <<< חדש (לרוב ה-Engine יקבע, אבל שומר תאימות)
         };
 
         /// GET /api/shopping/lists?take=20
@@ -78,11 +87,10 @@ namespace TS.Api.Features.ShoppingList
             var svc = _factory.Create(idToken);
             var lists = await svc.GetListsAsync(userId!, take);
 
-            // ממיינים לפי Order לפני ההחזרה (גם אם השירות כבר מחזיר ממוין)
             var payload = new GetListsResponseDto
             {
                 Lists = lists
-                    .OrderBy(l => l.Order) // <<< חשוב לעקביות
+                    .OrderBy(l => l.Order)
                     .Select(Map)
                     .ToArray()
             };
@@ -124,10 +132,8 @@ namespace TS.Api.Features.ShoppingList
 
             var svc = _factory.Create(idToken);
 
-            // <<< חדש: מעבירים את ה-Order אם התקבל; אחרת, ה-implementation ישבץ לסוף.
             await svc.CreateListAsync(userId!, body.ListId, body.Name, body.Order);
 
-            // נחזיר את הרשימה שנוצרה
             var created = await svc.LoadAsync(userId!, body.ListId);
 
             return Ok(new CreateListResponseDto
@@ -155,7 +161,7 @@ namespace TS.Api.Features.ShoppingList
             if (string.IsNullOrWhiteSpace(userId))
                 return Unauthorized("Missing user identity.");
 
-            var engineList = Map(userId!, body.List); // <<< מעביר גם Order וגם UserId
+            var engineList = Map(userId!, body.List);
 
             var svc = _factory.Create(idToken);
             await svc.SaveAsync(engineList);
@@ -179,6 +185,77 @@ namespace TS.Api.Features.ShoppingList
             await svc.DeleteListAsync(userId!, listId);
 
             return NoContent();
+        }
+
+        /// POST /api/shopping/lists/{listId}/share
+        [HttpPost("lists/{listId}/share")]
+        public async Task<IActionResult> Share(string listId, [FromBody] ShareListRequestDto? body)
+        {
+            if (string.IsNullOrWhiteSpace(listId) || body is null || string.IsNullOrWhiteSpace(body.Target))
+                return BadRequest(new ShareListResponseDto { Ok = false, Error = "Invalid request" });
+
+            var idToken = BearerTokenReader.Read(Request);
+            if (string.IsNullOrWhiteSpace(idToken))
+                return Unauthorized(new ShareListResponseDto { Ok = false, Error = "Missing bearer token." });
+
+            var userId = GetUserId();
+            if (string.IsNullOrWhiteSpace(userId))
+                return Unauthorized(new ShareListResponseDto { Ok = false, Error = "Missing user identity." });
+
+            var requireAccept = body.RequireAccept ?? false;
+
+            try
+            {
+                var svc = _factory.Create(idToken);
+                var updated = await svc.ShareAsync(userId!, listId, body.Target, requireAccept);
+
+                return Ok(new ShareListResponseDto
+                {
+                    Ok = true,
+                    List = Map(updated)
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new ShareListResponseDto { Ok = false, Error = ex.Message });
+            }
+            catch
+            {
+                return StatusCode(500, new ShareListResponseDto { Ok = false, Error = "Failed to share the list." });
+            }
+        }
+
+        /// POST /api/shopping/lists/{listId}/leave
+        [HttpPost("lists/{listId}/leave")]
+        public async Task<IActionResult> Leave(string listId)
+        {
+            var idToken = BearerTokenReader.Read(Request);
+            if (string.IsNullOrWhiteSpace(idToken))
+                return Unauthorized("Missing bearer token.");
+
+            var userId = GetUserId();
+            if (string.IsNullOrWhiteSpace(userId))
+                return Unauthorized("Missing user identity.");
+
+            try
+            {
+                var svc = _factory.Create(idToken);
+                await svc.LeaveAsync(userId!, listId);
+
+                return Ok(new LeaveListResponseDto
+                {
+                    Ok = true,
+                    ListId = listId
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new LeaveListResponseDto { Ok = false, ListId = listId, Error = ex.Message });
+            }
+            catch
+            {
+                return StatusCode(500, new LeaveListResponseDto { Ok = false, ListId = listId, Error = "Failed to leave the list." });
+            }
         }
     }
 }

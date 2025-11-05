@@ -197,10 +197,10 @@ const styles = StyleSheet.create({
   ml2: { marginLeft: 8 },
   editIconBtn: {
     marginRight: 12,
-    width: 36,
-    height: 36,
+    width: 15,
+    height: 30,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 10,
+    borderRadius: 8,
   },
 });

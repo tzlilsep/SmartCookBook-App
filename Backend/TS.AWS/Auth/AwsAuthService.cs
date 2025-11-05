@@ -1,4 +1,5 @@
-﻿using Amazon;
+﻿// Backend\TS.AWS\Auth\AwsAuthService.cs
+using Amazon;
 using Amazon.CognitoIdentityProvider;
 using Amazon.CognitoIdentityProvider.Model;
 using Amazon.Runtime;

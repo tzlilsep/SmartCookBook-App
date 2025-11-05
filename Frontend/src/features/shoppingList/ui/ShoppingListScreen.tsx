@@ -1,3 +1,4 @@
+// Frontend/src/features/shoppingList/ui/ShoppingListScreen.tsx
 import React, { useEffect } from 'react';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,6 +8,7 @@ import { ShoppingListsScreen } from './screens/ShoppingListsScreen';
 import { ShoppingListDetailsScreen } from './screens/ShoppingListDetailsScreen';
 import { useAuth } from '../../auth/model/auth.context';
 import { shoppingService } from '../api/shopping.service';
+import { Alert } from 'react-native';
 
 type Props = {
   onBack: () => void;
@@ -14,8 +16,13 @@ type Props = {
 };
 
 const CACHE_KEY = 'shopping/lists:v1';
+const userCacheKey = (userId?: string | null) => `${CACHE_KEY}:${userId ?? 'anon'}`;
 
 export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
+  const { auth } = useAuth();
+  const insets = useSafeAreaInsets();
+  const safeTop = insets.top && insets.top > 0 ? insets.top : 44;
+
   const {
     lists,
     setLists,
@@ -23,38 +30,34 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
     setSelectedListId,
     currentList,
     addList,
-    /* deleteList,  <-- מוסר: לא משתמשים כדי לא לשנות order */
+    // deleteList, // לא משתמשים כדי לא לשנות order
     renameList,
     addItem,
     deleteItem,
     toggleItem,
     clearCompleted,
   } = useShoppingLists(
-  initialLists,
-  async (listsToPersist) => {
-    // אם אין טוקן – רק קאש מקומי
-    if (!auth?.token) {
+    initialLists,
+    async (listsToPersist) => {
+      const key = userCacheKey(auth?.userId);
+
+      if (!auth?.token) {
+        try {
+          const sorted = sortByOrder(listsToPersist as any);
+          await AsyncStorage.setItem(key, JSON.stringify(sorted));
+        } catch {}
+        return;
+      }
+
       try {
+        await shoppingService.saveMany(auth.token, listsToPersist);
         const sorted = sortByOrder(listsToPersist as any);
-        await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(sorted));
-      } catch {}
-      return;
+        await AsyncStorage.setItem(key, JSON.stringify(sorted));
+      } catch (e) {
+        console.warn('Failed to persist lists to server:', e);
+      }
     }
-
-    // יש טוקן – שומרות לענן וגם מעדכנות קאש
-    try {
-      await shoppingService.saveMany(auth.token, listsToPersist);
-      const sorted = sortByOrder(listsToPersist as any);
-      await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(sorted));
-    } catch (e) {
-      console.warn('Failed to persist lists to server:', e);
-    }
-  }
-);
-
-  const { auth } = useAuth();
-  const insets = useSafeAreaInsets();
-  const safeTop = insets.top && insets.top > 0 ? insets.top : 44;
+  );
 
   /** Utility: always return a list sorted by `order` (fallback to index). */
   const sortByOrder = (arr: ShoppingListData[]) =>
@@ -62,17 +65,12 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
       const ao = a.order ?? Number.MAX_SAFE_INTEGER;
       const bo = b.order ?? Number.MAX_SAFE_INTEGER;
       if (ao !== bo) return ao - bo;
-      // tie-breaker: keep stable by id to avoid jitter
       return String(a.id).localeCompare(String(b.id));
     });
 
-  /**
-   * Create-list handler:
-   * - Assigns incremental `order` so the new list appears at the bottom.
-   * - If token exists: creates on server with that `order`, else local.
-   * - Writes to cache.
-   */
+  /** Create list */
   const handleCreateList = async (name: string) => {
+    const key = userCacheKey(auth?.userId);
     const finalName = name?.trim() || 'רשימה חדשה';
 
     const appendWithOrder = (base: ShoppingListData[], newList: ShoppingListData) => {
@@ -80,18 +78,19 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
         base.length === 0 ? 0 : Math.max(...base.map(l => (l as any).order ?? -1)) + 1;
       const withOrder = { ...(newList as any), order: nextOrder } as any;
       const next = sortByOrder([...base, withOrder]);
-      AsyncStorage.setItem(CACHE_KEY, JSON.stringify(next)).catch(() => {});
+      AsyncStorage.setItem(key, JSON.stringify(next)).catch(() => {});
       return next;
     };
 
     if (!auth.token) {
-      // Local only
-      setLists(prev => appendWithOrder(prev, { id: Date.now(), name: finalName, items: [] } as any));
+      // Local only – ודא שאנחנו הבעלים מקומית
+      setLists(prev =>
+        appendWithOrder(prev, { id: Date.now(), name: finalName, items: [], isOwner: true, isShared: false, sharedWith: [] } as any)
+      );
       return;
     }
 
     try {
-      // <<< שולחים order לשרת כבר ביצירה
       const current = lists;
       const nextOrder =
         current.length === 0 ? 0 : Math.max(...current.map(l => (l as any).order ?? -1)) + 1;
@@ -99,52 +98,76 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
 
       setLists(prev => {
         const next = sortByOrder([...prev, created]);
-        AsyncStorage.setItem(CACHE_KEY, JSON.stringify(next)).catch(() => {});
+        AsyncStorage.setItem(key, JSON.stringify(next)).catch(() => {});
         return next;
       });
     } catch (e) {
       console.warn('Create list failed, falling back to local:', e);
-      setLists(prev => appendWithOrder(prev, { id: Date.now(), name: finalName, items: [] } as any));
+      setLists(prev =>
+        appendWithOrder(prev, { id: Date.now(), name: finalName, items: [], isOwner: true, isShared: false, sharedWith: [] } as any)
+      );
     }
   };
 
-  /**
-   * ✅ Delete-list handler (ענן + לוקאלי) — לא נוגעים ב-order של אחרות.
-   * - אופטימי: מסיר מה־state ומעדכן Cache.
-   * - אם יש token: שולח DELETE לשרת.
-   */
+  /** ✅ Delete vs Leave (smart) */
   const handleDeleteList = async (id: number) => {
-    // אופטימי: הסרה מקומית ושמירת קאש (בלי רה-אינדוקס order)
+    const key = userCacheKey(auth?.userId);
+    const list = lists.find(l => l.id === id);
+
+    // אופטימי: הסרה מקומית ושמירת קאש
     setLists(prev => {
       const next = prev.filter(l => l.id !== id);
-      const sorted = sortByOrder(next); // רק סידור לפי order קיים; לא משנים ערכים
-      AsyncStorage.setItem(CACHE_KEY, JSON.stringify(sorted)).catch(() => {});
+      const sorted = sortByOrder(next);
+      AsyncStorage.setItem(key, JSON.stringify(sorted)).catch(() => {});
       return sorted;
     });
-
     if (selectedListId === id) setSelectedListId(null);
 
     if (auth.token) {
       try {
-        await shoppingService.deleteList(auth.token, id); // מחיקה בענן
+        if (list?.isShared && !list?.isOwner) {
+          // לא בעלים ברשימה משותפת → עזיבה בלבד
+          await shoppingService.leaveList(auth.token, id);
+        } else {
+          // בעלים או לא משותפת → מחיקה מלאה
+          await shoppingService.deleteList(auth.token, id);
+        }
       } catch (e) {
-        console.warn('Failed to delete on server:', e);
-        // אופציונלי: לשקול Rollback/טוסט; לפי בקשתך נשאיר פשוט.
+        console.warn('Failed to delete/leave on server:', e);
       }
     }
   };
 
-  /**
-   * Persist reordering from DraggableFlatList:
-   * - Normalize `order` to match visual index and persist to cache.
-   * - If authenticated: also persist to server (optimistic).
-   */
+  /** עזיבה מפורשת (משמש כשמסך הפנימי יקרא onLeaveList ישירות) */
+  const handleLeaveList = async (id: number) => {
+    const key = userCacheKey(auth?.userId);
+
+    // אופטימי: מסיר מקומית
+    setLists(prev => {
+      const next = prev.filter(l => l.id !== id);
+      const sorted = sortByOrder(next);
+      AsyncStorage.setItem(key, JSON.stringify(sorted)).catch(() => {});
+      return sorted;
+    });
+    if (selectedListId === id) setSelectedListId(null);
+
+    if (auth.token) {
+      try {
+        await shoppingService.leaveList(auth.token, id);
+      } catch (e) {
+        console.warn('Failed to leave on server:', e);
+      }
+    }
+  };
+
+  /** Reorder */
   const handleReorder = async (nextLists: ShoppingListData[]) => {
+    const key = userCacheKey(auth?.userId);
     const normalized = nextLists.map((l, idx) => ({ ...(l as any), order: idx })) as any[];
     const sorted = sortByOrder(normalized);
 
     setLists(sorted);
-    AsyncStorage.setItem(CACHE_KEY, JSON.stringify(sorted)).catch(() => {});
+    AsyncStorage.setItem(key, JSON.stringify(sorted)).catch(() => {});
 
     if (auth.token) {
       try {
@@ -155,12 +178,43 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
     }
   };
 
-  /** 1) Hydration from local cache. */
+  /** Share (no approval) */
+  const handleShareList = async (id: number, identifier: string) => {
+    const key = userCacheKey(auth?.userId);
+
+    if (!auth?.token) {
+      Alert.alert('שיתוף רשימה', 'לא ניתן לשתף ללא התחברות.');
+      return;
+    }
+    if (identifier?.trim() && identifier.trim() === auth.userId) {
+      Alert.alert('שיתוף רשימה', 'אי אפשר לשתף רשימה עם עצמך.');
+      return;
+    }
+
+    try {
+      const updated = await shoppingService.shareList(auth.token, id, identifier.trim(), false);
+      setLists(prev => {
+        const next = prev.map(l => (l.id === updated.id ? updated : l));
+        const sorted = sortByOrder(next);
+        AsyncStorage.setItem(key, JSON.stringify(sorted)).catch(() => {});
+        return sorted;
+      });
+      Alert.alert('שיתוף רשימה', 'השיתוף בוצע בהצלחה.');
+    } catch (e: any) {
+      const msg = (e?.message || '').trim() || 'שגיאה בשיתוף הרשימה.';
+      Alert.alert('שיתוף נכשל', msg);
+    }
+  };
+
+  /** 1) Hydration from local cache */
   useEffect(() => {
     let isMounted = true;
+    const key = userCacheKey(auth?.userId);
+    setLists([]);
+
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(CACHE_KEY);
+        const raw = await AsyncStorage.getItem(key);
         if (!isMounted) return;
         if (raw) {
           const cached: ShoppingListData[] = JSON.parse(raw);
@@ -168,44 +222,36 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
             setLists(sortByOrder(cached as any));
           }
         }
-      } catch {
-        // ignore cache errors
-      }
+      } catch {}
     })();
+
     return () => {
       isMounted = false;
     };
-  }, [setLists]);
+  }, [auth.userId, setLists]);
 
-  /**
-   * 2) Remote fetch when authenticated: merge and respect server `order` if present.
-   */
+  /** 2) Remote fetch when authenticated */
   useEffect(() => {
     let isMounted = true;
+    const key = userCacheKey(auth?.userId);
+
     (async () => {
       if (!auth.token) return;
       try {
         const remote = await shoppingService.getLists(auth.token, 20);
         if (!isMounted) return;
-
-        setLists(prev => {
-          const orderMap = new Map(prev.map(l => [l.id, (l as any).order]));
-          const merged = remote.map((l, idx) => ({
-            ...l,
-            order: orderMap.get(l.id) ?? l.order ?? idx,
-          })) as any[];
-          const sorted = sortByOrder(merged);
-          AsyncStorage.setItem(CACHE_KEY, JSON.stringify(sorted)).catch(() => {});
-          return sorted;
-        });
+        const sorted = sortByOrder(remote);
+        setLists(sorted);
+        AsyncStorage.setItem(key, JSON.stringify(sorted)).catch(() => {});
       } catch (e) {
         console.warn('Failed loading shopping lists:', e);
       }
     })();
+
     return () => {
       isMounted = false;
     };
-  }, [auth.token, setLists]);
+  }, [auth.token, auth.userId, setLists]);
 
   // Details branch
   if (selectedListId !== null && currentList) {
@@ -216,7 +262,7 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
           list={currentList}
           onBack={() => setSelectedListId(null)}
           onRename={async (name) => {
-            renameList(currentList.id, name); // לוקאלי מידי
+            renameList(currentList.id, name);
             if (auth.token) {
               try {
                 await shoppingService.saveList(auth.token, { ...currentList, name });
@@ -239,12 +285,14 @@ export function ShoppingListScreen({ onBack, initialLists = [] }: Props) {
     <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right']}>
       <ShoppingListsScreen
         safeTop={safeTop}
-        lists={lists}                // already sorted by order
+        lists={lists}
         onBack={onBack}
         onCreateList={handleCreateList}
         onOpenList={(id) => setSelectedListId(id)}
-        onDeleteList={handleDeleteList}   // <<< עכשיו מוחק בענן בלי לשנות order
-        onReorder={handleReorder}         // שמירת סדר בענן כשגוררים
+        onDeleteList={handleDeleteList}
+        onLeaveList={handleLeaveList}        
+        onReorder={handleReorder}
+        onShareList={handleShareList}
       />
     </SafeAreaView>
   );
